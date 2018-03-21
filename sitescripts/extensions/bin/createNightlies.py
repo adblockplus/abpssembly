@@ -23,6 +23,7 @@ Nightly builds generation script
 
 """
 
+import argparse
 import ConfigParser
 import base64
 import hashlib
@@ -70,6 +71,8 @@ class NightlyBuild(object):
       generating changelogs and documentation.
     """
 
+    downloadable_repos = {'gecko'}
+
     def __init__(self, config):
         """
           Creates a NightlyBuild instance; we are simply
@@ -105,8 +108,6 @@ class NightlyBuild(object):
         """
         command = ['hg', 'id', '-n', '--config', 'defaults.id=', self.tempdir]
         build = subprocess.check_output(command).strip()
-        if self.config.type == 'gecko':
-            build += 'beta'
         return build
 
     def getChanges(self):
@@ -141,6 +142,14 @@ class NightlyBuild(object):
         if os.path.isfile(depscript):
             subprocess.check_call([sys.executable, depscript, '-q'])
 
+    def symlink_or_copy(self, source, target):
+        if hasattr(os, 'symlink'):
+            if os.path.exists(target):
+                os.remove(target)
+            os.symlink(os.path.basename(source), target)
+        else:
+            shutil.copyfile(source, target)
+
     def writeChangelog(self, changes):
         """
           write the changelog file into the cloned repository
@@ -156,12 +165,7 @@ class NightlyBuild(object):
         template.stream({'changes': changes}).dump(changelogPath, encoding='utf-8')
 
         linkPath = os.path.join(baseDir, '00latest.changelog.xhtml')
-        if hasattr(os, 'symlink'):
-            if os.path.exists(linkPath):
-                os.remove(linkPath)
-            os.symlink(os.path.basename(changelogPath), linkPath)
-        else:
-            shutil.copyfile(changelogPath, linkPath)
+        self.symlink_or_copy(changelogPath, linkPath)
 
     def readGeckoMetadata(self):
         """
@@ -171,10 +175,11 @@ class NightlyBuild(object):
         """
         import buildtools.packagerChrome as packager
         metadata = packager.readMetadata(self.tempdir, self.config.type)
-        self.extensionID = metadata.get('general', 'id')
+        self.extensionID = packager.get_app_id(False, metadata)
         self.version = packager.getBuildVersion(self.tempdir, metadata, False,
                                                 self.buildNum)
         self.basename = metadata.get('general', 'basename')
+        self.min_version = metadata.get('compat', 'gecko')
 
     def readAndroidMetadata(self):
         """
@@ -221,7 +226,7 @@ class NightlyBuild(object):
 
     def readSafariMetadata(self):
         import sitescripts.extensions.bin.legacy.packagerSafari as packager
-        from buildtools import xarfile
+        from sitescripts.extensions.bin.legacy import xarfile
         metadata = packager.readMetadata(self.tempdir, self.config.type)
         certs = xarfile.read_certificates_and_key(self.config.keyFile)[0]
 
@@ -257,6 +262,10 @@ class NightlyBuild(object):
         elif self.config.type == 'android':
             manifestPath = os.path.join(baseDir, 'updates.xml')
             templateName = 'androidUpdateManifest'
+            autoescape = True
+        elif self.config.type == 'gecko':
+            manifestPath = os.path.join(baseDir, 'updates.json')
+            templateName = 'geckoUpdateManifest'
             autoescape = True
         else:
             return
@@ -302,12 +311,7 @@ class NightlyBuild(object):
         for suffix in ['-x86.msi', '-x64.msi', '-gpo-x86.msi', '-gpo-x64.msi']:
             linkPath = os.path.join(baseDir, '00latest%s' % suffix)
             outputPath = os.path.join(baseDir, self.basename + '-' + version + suffix)
-            if hasattr(os, 'symlink'):
-                if os.path.exists(linkPath):
-                    os.remove(linkPath)
-                os.symlink(os.path.basename(outputPath), linkPath)
-            else:
-                shutil.copyfile(outputPath, linkPath)
+            self.symlink_or_copy(outputPath, linkPath)
 
     def build(self):
         """
@@ -345,8 +349,13 @@ class NightlyBuild(object):
             if spiderMonkeyBinary:
                 env = dict(env, SPIDERMONKEY_BINARY=spiderMonkeyBinary)
 
-            command = [os.path.join(self.tempdir, 'build.py'),
-                       'build', '-t', self.config.type, '-b', self.buildNum]
+            command = [os.path.join(self.tempdir, 'build.py')]
+            if self.config.type == 'safari':
+                command.extend(['-t', self.config.type, 'build'])
+            else:
+                command.extend(['build', '-t', self.config.type])
+            command.extend(['-b', self.buildNum])
+
             if self.config.type not in {'gecko', 'edge'}:
                 command.extend(['-k', self.config.keyFile])
             command.append(self.path)
@@ -355,13 +364,10 @@ class NightlyBuild(object):
         if not os.path.exists(self.path):
             raise Exception("Build failed, output file hasn't been created")
 
-        linkPath = os.path.join(baseDir, '00latest%s' % self.config.packageSuffix)
-        if hasattr(os, 'symlink'):
-            if os.path.exists(linkPath):
-                os.remove(linkPath)
-            os.symlink(os.path.basename(self.path), linkPath)
-        else:
-            shutil.copyfile(self.path, linkPath)
+        if self.config.type not in self.downloadable_repos:
+            linkPath = os.path.join(baseDir,
+                                    '00latest' + self.config.packageSuffix)
+            self.symlink_or_copy(self.path, linkPath)
 
     def retireBuilds(self):
         """
@@ -414,9 +420,45 @@ class NightlyBuild(object):
         template = get_template(get_config().get('extensions', 'nightlyIndexPage'))
         template.stream({'config': self.config, 'links': links}).dump(outputPath)
 
-    def uploadToMozillaAddons(self):
-        import urllib3
+    def read_downloads_lockfile(self):
+        path = get_config().get('extensions', 'downloadLockFile')
+        try:
+            with open(path, 'r') as fp:
+                current = json.load(fp)
+        except IOError:
+            logging.warning('No lockfile found. Creating ' + path)
+            current = {}
 
+        return current
+
+    def write_downloads_lockfile(self, values):
+        path = get_config().get('extensions', 'downloadLockFile')
+        with open(path, 'w') as fp:
+            json.dump(values, fp)
+
+    def add_to_downloads_lockfile(self, platform, values):
+        current = self.read_downloads_lockfile()
+
+        current.setdefault(platform, [])
+        current[platform].append(values)
+
+        self.write_downloads_lockfile(current)
+
+    def remove_from_downloads_lockfile(self, platform, filter_key,
+                                       filter_value):
+        current = self.read_downloads_lockfile()
+        try:
+            for i, entry in enumerate(current[platform]):
+                if entry[filter_key] == filter_value:
+                    del current[platform][i]
+                if len(current[platform]) == 0:
+                    del current[platform]
+        except KeyError:
+            pass
+        self.write_downloads_lockfile(current)
+
+    def generate_jwt_request(self, issuer, secret, url, method, data=None,
+                             add_headers=[]):
         header = {
             'alg': 'HS256',     # HMAC-SHA256
             'typ': 'JWT',
@@ -424,21 +466,33 @@ class NightlyBuild(object):
 
         issued = int(time.time())
         payload = {
-            'iss': get_config().get('extensions', 'amo_key'),
+            'iss': issuer,
             'jti': random.random(),
             'iat': issued,
             'exp': issued + 60,
         }
 
-        input = '{}.{}'.format(
+        hmac_data = '{}.{}'.format(
             base64.b64encode(json.dumps(header)),
             base64.b64encode(json.dumps(payload))
         )
 
-        signature = hmac.new(get_config().get('extensions', 'amo_secret'),
-                             msg=input,
+        signature = hmac.new(secret, msg=hmac_data,
                              digestmod=hashlib.sha256).digest()
-        token = '{}.{}'.format(input, base64.b64encode(signature))
+        token = '{}.{}'.format(hmac_data, base64.b64encode(signature))
+
+        request = urllib2.Request(url, data)
+        request.add_header('Authorization', 'JWT ' + token)
+        for header in add_headers:
+            request.add_header(*header)
+        request.get_method = lambda: method
+
+        return request
+
+    def uploadToMozillaAddons(self):
+        import urllib3
+
+        config = get_config()
 
         upload_url = ('https://addons.mozilla.org/api/v3/addons/{}/'
                       'versions/{}/').format(self.extensionID, self.version)
@@ -452,10 +506,14 @@ class NightlyBuild(object):
                 )
             })
 
-        request = urllib2.Request(upload_url, data=data)
-        request.add_header('Content-Type', content_type)
-        request.add_header('Authorization', 'JWT ' + token)
-        request.get_method = lambda: 'PUT'
+        request = self.generate_jwt_request(
+            config.get('extensions', 'amo_key'),
+            config.get('extensions', 'amo_secret'),
+            upload_url,
+            'PUT',
+            data,
+            [('Content-Type', content_type)]
+        )
 
         try:
             urllib2.urlopen(request).close()
@@ -465,6 +523,74 @@ class NightlyBuild(object):
             finally:
                 e.close()
             raise
+
+        self.add_to_downloads_lockfile(
+            self.config.type,
+            {
+                'buildtype': 'devbuild',
+                'app_id': self.extensionID,
+                'version': self.version,
+            }
+        )
+        os.remove(self.path)
+
+    def download_from_mozilla_addons(self, buildtype, version, app_id):
+        config = get_config()
+        iss = config.get('extensions', 'amo_key')
+        secret = config.get('extensions', 'amo_secret')
+
+        url = ('https://addons.mozilla.org/api/v3/addons/{}/'
+               'versions/{}/').format(app_id, version)
+
+        request = self.generate_jwt_request(iss, secret, url, 'GET')
+        response = json.load(urllib2.urlopen(request))
+
+        necessary = ['passed_review', 'reviewed', 'processed', 'valid']
+        if all(response[x] for x in necessary):
+            download_url = response['files'][0]['download_url']
+            checksum = response['files'][0]['hash']
+
+            filename = '{}-{}.xpi'.format(self.basename, version)
+            file_path = os.path.join(
+                config.get('extensions', 'nightliesDirectory'),
+                self.basename,
+                filename
+            )
+
+            request = self.generate_jwt_request(iss, secret, download_url,
+                                                'GET')
+            try:
+                response = urllib2.urlopen(request)
+            except urllib2.HTTPError as e:
+                logging.error(e.read())
+
+            # Verify the extension's integrity
+            file_content = response.read()
+            sha256 = hashlib.sha256(file_content)
+            returned_checksum = '{}:{}'.format(sha256.name, sha256.hexdigest())
+
+            if returned_checksum != checksum:
+                logging.error('Checksum could not be verified: {} vs {}'
+                              ''.format(checksum, returned_checksum))
+
+            with open(file_path, 'w') as fp:
+                fp.write(file_content)
+
+            self.update_link = os.path.join(
+                config.get('extensions', 'nightliesURL'),
+                self.basename,
+                filename
+            )
+
+            self.remove_from_downloads_lockfile(self.config.type,
+                                                'version',
+                                                version)
+        elif not response['passed_review'] or not response['valid']:
+            # When the review failed for any reason, we want to know about it
+            logging.error(json.dumps(response, indent=4))
+            self.remove_from_downloads_lockfile(self.config.type,
+                                                'version',
+                                                version)
 
     def uploadToChromeWebStore(self):
 
@@ -662,12 +788,12 @@ class NightlyBuild(object):
 
                 # create development build
                 self.build()
+                if self.config.type not in self.downloadable_repos:
+                    # write out changelog
+                    self.writeChangelog(self.getChanges())
 
-                # write out changelog
-                self.writeChangelog(self.getChanges())
-
-                # write update manifest
-                self.writeUpdateManifest()
+                    # write update manifest
+                    self.writeUpdateManifest()
 
             # retire old builds
             versions = self.retireBuilds()
@@ -675,8 +801,9 @@ class NightlyBuild(object):
             if self.config.type == 'ie':
                 self.writeIEUpdateManifest(versions)
 
-            # update index page
-            self.updateIndex(versions)
+            if self.config.type not in self.downloadable_repos:
+                # update index page
+                self.updateIndex(versions)
 
             # update nightlies config
             self.config.latestRevision = self.revision
@@ -695,13 +822,45 @@ class NightlyBuild(object):
             if self.tempdir:
                 shutil.rmtree(self.tempdir, ignore_errors=True)
 
+    def download(self):
+        with open(get_config().get('extensions', 'downloadLockFile')) as fp:
+            download_info = json.load(fp)
 
-def main():
+        downloads = self.downloadable_repos.intersection(download_info.keys())
+
+        if self.config.type in downloads:
+            try:
+                self.copyRepository()
+                self.readGeckoMetadata()
+
+                for data in download_info[self.config.type]:
+                    self.version = data['version']
+
+                    self.download_from_mozilla_addons(**data)
+
+                    # write out changelog
+                    self.writeChangelog(self.getChanges())
+
+                    # write update manifest
+                    self.writeUpdateManifest()
+
+                    # retire old builds
+                    versions = self.retireBuilds()
+                    # update index page
+                    self.updateIndex(versions)
+            finally:
+                # clean up
+                if self.tempdir:
+                    shutil.rmtree(self.tempdir, ignore_errors=True)
+
+
+def main(download=False):
     """
       main function for createNightlies.py
     """
     nightlyConfig = ConfigParser.SafeConfigParser()
     nightlyConfigFile = get_config().get('extensions', 'nightliesData')
+
     if os.path.exists(nightlyConfigFile):
         nightlyConfig.read(nightlyConfigFile)
 
@@ -712,7 +871,9 @@ def main():
         build = None
         try:
             build = NightlyBuild(repo)
-            if build.hasChanges():
+            if download:
+                build.download()
+            elif build.hasChanges():
                 build.run()
         except Exception as ex:
             logging.error('The build for %s failed:', repo)
@@ -723,4 +884,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--download', action='store_true', default=False)
+    args = parser.parse_args()
+    main(args.download)

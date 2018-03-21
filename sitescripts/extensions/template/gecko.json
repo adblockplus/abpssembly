@@ -1,0 +1,16 @@
+{
+  "addons": {
+  {%- for extension in extensions %}
+    "{{ extension.extensionID }}": {
+      "updates": [
+        {
+          "version": "{{ extension.version }}",
+          "update_link": "{{ extension.update_link }}" },
+          "applications": {
+          "gecko": { "strict_min_version": "{{ extension.min_version }}" }
+        }
+      ]
+    }
+  {%- endfor %}
+  }
+}
