@@ -426,7 +426,7 @@ class NightlyBuild(object):
             with open(path, 'r') as fp:
                 current = json.load(fp)
         except IOError:
-            logging.warning('No lockfile found. Creating ' + path)
+            logging.debug('No lockfile found at ' + path)
             current = {}
 
         return current
@@ -823,9 +823,7 @@ class NightlyBuild(object):
                 shutil.rmtree(self.tempdir, ignore_errors=True)
 
     def download(self):
-        with open(get_config().get('extensions', 'downloadLockFile')) as fp:
-            download_info = json.load(fp)
-
+        download_info = self.read_downloads_lockfile()
         downloads = self.downloadable_repos.intersection(download_info.keys())
 
         if self.config.type in downloads:
