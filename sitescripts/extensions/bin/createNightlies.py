@@ -545,17 +545,17 @@ class NightlyBuild(object):
         request = self.generate_jwt_request(iss, secret, url, 'GET')
         response = json.load(urllib2.urlopen(request))
 
+        filename = '{}-{}.xpi'.format(self.basename, version)
+        self.path = os.path.join(
+            config.get('extensions', 'nightliesDirectory'),
+            self.basename,
+            filename
+        )
+
         necessary = ['passed_review', 'reviewed', 'processed', 'valid']
         if all(response[x] for x in necessary):
             download_url = response['files'][0]['download_url']
             checksum = response['files'][0]['hash']
-
-            filename = '{}-{}.xpi'.format(self.basename, version)
-            file_path = os.path.join(
-                config.get('extensions', 'nightliesDirectory'),
-                self.basename,
-                filename
-            )
 
             request = self.generate_jwt_request(iss, secret, download_url,
                                                 'GET')
@@ -573,7 +573,7 @@ class NightlyBuild(object):
                 logging.error('Checksum could not be verified: {} vs {}'
                               ''.format(checksum, returned_checksum))
 
-            with open(file_path, 'w') as fp:
+            with open(self.path, 'w') as fp:
                 fp.write(file_content)
 
             self.update_link = os.path.join(
@@ -835,17 +835,27 @@ class NightlyBuild(object):
                     self.version = data['version']
 
                     self.download_from_mozilla_addons(**data)
+                    if os.path.exists(self.path):
+                        # write out changelog
+                        self.writeChangelog(self.getChanges())
 
-                    # write out changelog
-                    self.writeChangelog(self.getChanges())
+                        # write update manifest
+                        self.writeUpdateManifest()
 
-                    # write update manifest
-                    self.writeUpdateManifest()
+                        # retire old builds
+                        versions = self.retireBuilds()
+                        # update index page
+                        self.updateIndex(versions)
 
-                    # retire old builds
-                    versions = self.retireBuilds()
-                    # update index page
-                    self.updateIndex(versions)
+                        # Update soft link to latest build
+                        baseDir = os.path.join(
+                            self.config.nightliesDirectory, self.basename
+                        )
+                        linkPath = os.path.join(
+                            baseDir, '00latest' + self.config.packageSuffix
+                        )
+
+                        self.symlink_or_copy(self.path, linkPath)
             finally:
                 # clean up
                 if self.tempdir:
