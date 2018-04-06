@@ -5,12 +5,13 @@
       "updates": [
         {
           "version": "{{ extension.version }}",
-          "update_link": "{{ extension.update_link }}" },
+          "update_link": "{{ extension.update_link }}",
           "applications": {
-          "gecko": { "strict_min_version": "{{ extension.min_version }}" }
+            "gecko": { "strict_min_version": "{{ extension.min_version }}" }
+          }
         }
       ]
-    }
+    }{% if not loop.last %},{% endif %}
   {%- endfor %}
   }
 }
