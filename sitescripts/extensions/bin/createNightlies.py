@@ -350,11 +350,8 @@ class NightlyBuild(object):
                 env = dict(env, SPIDERMONKEY_BINARY=spiderMonkeyBinary)
 
             command = [os.path.join(self.tempdir, 'build.py')]
-            if self.config.type == 'safari':
-                command.extend(['-t', self.config.type, 'build'])
-            else:
-                command.extend(['build', '-t', self.config.type])
-            command.extend(['-b', self.buildNum])
+            command.extend(['build', '-t', self.config.type, '-b',
+                            self.buildNum])
 
             if self.config.type not in {'gecko', 'edge'}:
                 command.extend(['-k', self.config.keyFile])
