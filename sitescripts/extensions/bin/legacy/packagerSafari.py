@@ -92,7 +92,7 @@ def createManifest(params, files):
         menus=parse_section('menus', 2),
         toolbarItems=parse_section('toolbar_items'),
         popovers=parse_section('popovers'),
-        developerIdentifier=params.get('developerIdentifier')
+        developerIdentifier=params.get('developerIdentifier'),
     ).encode('utf-8')
 
 
@@ -160,7 +160,7 @@ def convertJS(params, files):
 
         files[filename] = template.render(
             args=current_args,
-            modules=modules
+            modules=modules,
         ).encode('utf-8')
 
 
@@ -192,7 +192,7 @@ def createBuild(baseDir, type, outFile=None, buildNum=None, releaseBuild=False, 
     if metadata.has_section('preprocess'):
         files.preprocess(
             [f for f, _ in metadata.items('preprocess')],
-            {'needsExt': True}
+            {'needsExt': True},
         )
 
     if metadata.has_section('import_locales'):

@@ -35,7 +35,7 @@ PACKAGE_SUFFIXES = {
     'safari': '.safariextz',
     'ie': '.exe',
     'android': '.apk',
-    'edge': '.appx'
+    'edge': '.appx',
 }
 
 
@@ -378,11 +378,11 @@ def writeIEUpdateManifest(path, extensions):
         version = extension['version']
         updates['%s/%s' % (basename, 'msie64')] = {
             'url': updateURL.replace('.exe', '-x64.msi'),
-            'version': version
+            'version': version,
         }
         updates['%s/%s' % (basename, 'msie32')] = {
             'url': updateURL.replace('.exe', '-x86.msi'),
-            'version': version
+            'version': version,
         }
     writeLibabpUpdateManifest(path, updates)
 
@@ -399,6 +399,6 @@ def writeAndroidUpdateManifest(path, extensions):
     for extension in extensions:
         updates[extension['basename']] = {
             'url': extension['updateURL'],
-            'version': extension['version']
+            'version': extension['version'],
         }
     writeLibabpUpdateManifest(path, updates)
