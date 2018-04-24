@@ -317,7 +317,12 @@ class NightlyBuild(object):
         """
           run the build command in the tempdir
         """
-        baseDir = os.path.join(self.config.nightliesDirectory, self.basename)
+        if self.config.type not in self.downloadable_repos:
+            baseDir = os.path.join(self.config.nightliesDirectory,
+                                   self.basename)
+        else:
+            baseDir = self.tempdir
+
         if not os.path.exists(baseDir):
             os.makedirs(baseDir)
         outputFile = '%s-%s%s' % (self.basename, self.version, self.config.packageSuffix)
@@ -515,6 +520,11 @@ class NightlyBuild(object):
         try:
             urllib2.urlopen(request).close()
         except urllib2.HTTPError as e:
+            shutil.copyfile(
+                self.path,
+                os.path.join(get_config().get('extensions', 'root'),
+                             'failed.' + self.config.packageSuffix),
+            )
             try:
                 logging.error(e.read())
             finally:

@@ -61,6 +61,7 @@ dataPath=%(root)s/logs
 fileName=log.%%i.gz
 
 [extensions]
+root=/server/root/path
 abp_repository=%(hgroot)s/adblockplus
 abp_name=Adblock Plus for Mozilla Firefox
 abp_galleryID=adblock-plus
