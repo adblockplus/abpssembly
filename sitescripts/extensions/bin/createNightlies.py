@@ -25,6 +25,7 @@ Nightly builds generation script
 
 import argparse
 import ConfigParser
+import binascii
 import base64
 import hashlib
 import hmac
@@ -32,20 +33,23 @@ import json
 import logging
 import os
 import pipes
-import random
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from urllib import urlencode
 import urllib2
 import urlparse
 import zipfile
 import contextlib
-
 from xml.dom.minidom import parse as parseXml
+
+from Crypto.PublicKey import RSA
+from Crypto.Signature import PKCS1_v1_5
+import Crypto.Hash.SHA256
 
 from sitescripts.extensions.utils import (
     compareVersions, Configuration,
@@ -459,32 +463,52 @@ class NightlyBuild(object):
             pass
         self.write_downloads_lockfile(current)
 
-    def generate_jwt_request(self, issuer, secret, url, method, data=None,
-                             add_headers=[]):
-        header = {
-            'alg': 'HS256',     # HMAC-SHA256
-            'typ': 'JWT',
-        }
-
-        issued = int(time.time())
-        payload = {
-            'iss': issuer,
-            'jti': random.random(),
-            'iat': issued,
-            'exp': issued + 60,
-        }
-
-        hmac_data = '{}.{}'.format(
-            base64.b64encode(json.dumps(header)),
-            base64.b64encode(json.dumps(payload)),
+    def azure_jwt_signature_fnc(self):
+        return (
+            'RS256',
+            lambda s, m: PKCS1_v1_5.new(s).sign(Crypto.Hash.SHA256.new(m)),
         )
 
-        signature = hmac.new(secret, msg=hmac_data,
-                             digestmod=hashlib.sha256).digest()
-        token = '{}.{}'.format(hmac_data, base64.b64encode(signature))
+    def mozilla_jwt_signature_fnc(self):
+        return (
+            'HS256',
+            lambda s, m: hmac.new(s, msg=m, digestmod=hashlib.sha256).digest(),
+        )
+
+    def sign_jwt(self, issuer, secret, url, signature_fnc, jwt_headers={}):
+        alg, fnc = signature_fnc()
+
+        header = {'typ': 'JWT'}
+        header.update(jwt_headers)
+        header.update({'alg': alg})
+
+        issued = int(time.time())
+        expires = issued + 60
+
+        payload = {
+            'aud': url,
+            'iss': issuer,
+            'sub': issuer,
+            'jti': str(uuid.uuid4()),
+            'iat': issued,
+            'nbf': issued,
+            'exp': expires,
+        }
+
+        segments = [base64.urlsafe_b64encode(json.dumps(header)),
+                    base64.urlsafe_b64encode(json.dumps(payload))]
+
+        signature = fnc(secret, b'.'.join(segments))
+        segments.append(base64.urlsafe_b64encode(signature))
+        return b'.'.join(segments)
+
+    def generate_mozilla_jwt_request(self, issuer, secret, url, method,
+                                     data=None, add_headers=[]):
+        signed = self.sign_jwt(issuer, secret, url,
+                               self.mozilla_jwt_signature_fnc)
 
         request = urllib2.Request(url, data)
-        request.add_header('Authorization', 'JWT ' + token)
+        request.add_header('Authorization', 'JWT ' + signed)
         for header in add_headers:
             request.add_header(*header)
         request.get_method = lambda: method
@@ -508,7 +532,7 @@ class NightlyBuild(object):
                 ),
             })
 
-        request = self.generate_jwt_request(
+        request = self.generate_mozilla_jwt_request(
             config.get('extensions', 'amo_key'),
             config.get('extensions', 'amo_secret'),
             upload_url,
@@ -549,7 +573,9 @@ class NightlyBuild(object):
         url = ('https://addons.mozilla.org/api/v3/addons/{}/'
                'versions/{}/').format(app_id, version)
 
-        request = self.generate_jwt_request(iss, secret, url, 'GET')
+        request = self.generate_mozilla_jwt_request(
+            iss, secret, url, 'GET',
+        )
         response = json.load(urllib2.urlopen(request))
 
         filename = '{}-{}.xpi'.format(self.basename, version)
@@ -564,8 +590,9 @@ class NightlyBuild(object):
             download_url = response['files'][0]['download_url']
             checksum = response['files'][0]['hash']
 
-            request = self.generate_jwt_request(iss, secret, download_url,
-                                                'GET')
+            request = self.generate_mozilla_jwt_request(
+                iss, secret, download_url, 'GET',
+            )
             try:
                 response = urllib2.urlopen(request)
             except urllib2.HTTPError as e:
@@ -656,21 +683,44 @@ class NightlyBuild(object):
         if any(status not in ('OK', 'ITEM_PENDING_REVIEW') for status in response['status']):
             raise Exception({'status': response['status'], 'statusDetail': response['statusDetail']})
 
+    def generate_certificate_token_request(self, url, private_key):
+        # Construct the token request according to
+        # https://docs.microsoft.com/en-us/azure/active-directory/develop/active-directory-certificate-credentials
+        hex_val = binascii.a2b_hex(self.config.thumbprint)
+        x5t = base64.urlsafe_b64encode(hex_val).decode()
+
+        key = RSA.importKey(private_key)
+
+        signed = self.sign_jwt(self.config.clientID, key, url,
+                               self.azure_jwt_signature_fnc,
+                               jwt_headers={'x5t': x5t})
+
+        # generate oauth parameters for login.microsoft.com
+        oauth_params = {
+            'grant_type': 'client_credentials',
+            'client_id': self.config.clientID,
+            'resource': 'https://graph.windows.net',
+            'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-'
+                                     'type:jwt-bearer',
+            'client_assertion': signed,
+        }
+
+        request = urllib2.Request(url, urlencode(oauth_params))
+        request.get_method = lambda: 'POST'
+
+        return request
+
     def get_windows_store_access_token(self):
-        # use refresh token to obtain a valid access token
-        # https://docs.microsoft.com/en-us/azure/active-directory/active-directory-protocols-oauth-code#refreshing-the-access-tokens
-        server = 'https://login.microsoftonline.com'
-        token_path = '{}/{}/oauth2/token'.format(server, self.config.tenantID)
+        # use client certificate to obtain a valid access token
+        url_template = 'https://login.microsoftonline.com/{}/oauth2/token'
+        url = url_template.format(self.config.tenantID)
+
+        with open(self.config.privateKey, 'r') as fp:
+            private_key = fp.read()
 
         opener = urllib2.build_opener(HTTPErrorBodyHandler)
-        post_data = urlencode([
-            ('refresh_token', self.config.refreshToken),
-            ('client_id', self.config.clientID),
-            ('client_secret', self.config.clientSecret),
-            ('grant_type', 'refresh_token'),
-            ('resource', 'https://graph.windows.net'),
-        ])
-        request = urllib2.Request(token_path, post_data)
+        request = self.generate_certificate_token_request(url, private_key)
+
         with contextlib.closing(opener.open(request)) as response:
             data = json.load(response)
             auth_token = '{0[token_type]} {0[access_token]}'.format(data)
@@ -821,7 +871,7 @@ class NightlyBuild(object):
                 self.uploadToMozillaAddons()
             elif self.config.type == 'chrome' and self.config.clientID and self.config.clientSecret and self.config.refreshToken:
                 self.uploadToChromeWebStore()
-            elif self.config.type == 'edge' and self.config.clientID and self.config.clientSecret and self.config.refreshToken and self.config.tenantID:
+            elif self.config.type == 'edge' and self.config.clientID and self.config.tenantID and self.config.privateKey and self.config.thumbprint:
                 self.upload_to_windows_store()
 
         finally:
