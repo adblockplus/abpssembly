@@ -6,4 +6,5 @@ syntax: glob
 .cache
 .sitescripts.test
 .coverage
+.pytest_cache
 htmlcov/
