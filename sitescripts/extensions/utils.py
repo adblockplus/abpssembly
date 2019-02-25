@@ -277,16 +277,14 @@ def _getMozillaDownloadLink(galleryID):
     """
     gets download link for a Gecko add-on from the Mozilla Addons site
     """
-    url = 'https://services.addons.mozilla.org/en-US/firefox/api/1/addon/%s' % _urlencode(galleryID)
-    document = _parseXMLDocument(url)
-    linkTags = document.getElementsByTagName('install')
-    linkTag = linkTags[0] if len(linkTags) > 0 else None
-    versionTags = document.getElementsByTagName('version')
-    versionTag = versionTags[0] if len(versionTags) > 0 else None
-    if linkTag and versionTag and linkTag.firstChild and versionTag.firstChild:
-        return (linkTag.firstChild.data, versionTag.firstChild.data)
-    else:
-        return (None, None)
+    url = 'https://addons.mozilla.org/api/v3/addons/addon/' + galleryID
+    with _urlopen(url) as data:
+        result = json.load(data)
+
+    return (
+        result['current_version']['files'][0]['url'],
+        result['current_version']['version'],
+    )
 
 
 def _getLocalLink(repo):
